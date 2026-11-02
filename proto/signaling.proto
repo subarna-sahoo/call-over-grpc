@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package signaling;
+
+option go_package = "github.com/subarna-sahoo/call-over-grpc/proto;proto";
+
+// CallService relays WebRTC signaling (offers, answers, ICE candidates) between
+// the peers in a room.
+service CallService {
+  // Join a room and receive every event broadcast to it until the stream closes.
+  rpc JoinRoom(JoinRequest) returns (stream RoomEvent);
+  // Broadcast a signaling message to everyone in the room.
+  rpc SendSignal(SignalRequest) returns (SignalResponse);
+}
+
+message JoinRequest {
+  string room_id = 1;
+}
+
+message RoomEvent {
+  string user_id = 1;
+  string event_type = 2; // "joined", "left", or the signal type (e.g. "offer", "answer", "ice")
+  string payload = 3;
+}
+
+message SignalRequest {
+  string room_id = 1;
+  string from_user = 2;
+  string signal_type = 3;
+  string signal_data = 4;
+}
+
+message SignalResponse {
+  string status = 1;
+}

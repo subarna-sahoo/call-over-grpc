@@ -11,27 +11,49 @@ A **gRPC signaling server** in Go for video and voice calls. Clients join a room
 
 - Rooms are kept in memory as `map[roomId][]stream`, guarded by a `sync.RWMutex`.
 - Unary and stream interceptors attach the client's IP address to the request context. The IP is currently used as the user ID.
+- Clients that disconnect are removed from the room, and the others get a `left` event.
 - The server listens on **`:50051`**.
 
 ## Running
 
-> **Note:** `main.go` imports the generated protobuf package `video_signaling/proto`, which is not committed yet. Add the `.proto` file and generate the Go code before building.
+```bash
+go run .            # gRPC server on :50051
+```
+
+Try it with [grpcurl](https://github.com/fullstorydev/grpcurl):
 
 ```bash
-# dependencies
-go get google.golang.org/grpc
-go get google.golang.org/protobuf
-go get github.com/improbable-eng/grpc-web/go/grpcweb   # for browser clients via gRPC-Web
+# terminal 1: join a room and watch events
+grpcurl -plaintext -import-path proto -proto signaling.proto \
+  -d '{"room_id": "demo"}' localhost:50051 signaling.CallService/JoinRoom
 
-# generate stubs (once the .proto is added)
-protoc --go_out=. --go-grpc_out=. proto/*.proto
+# terminal 2: send a signal to the room
+grpcurl -plaintext -import-path proto -proto signaling.proto \
+  -d '{"room_id": "demo", "from_user": "alice", "signal_type": "offer", "signal_data": "<sdp>"}' \
+  localhost:50051 signaling.CallService/SendSignal
+```
 
-go run main.go
+## Tests
+
+```bash
+go test -race ./...
+```
+
+The tests start the server in memory (bufconn) and check that signals reach everyone in a room, and that clients are removed and a `left` event is sent when they disconnect.
+
+## Regenerating the gRPC code
+
+The service is defined in [`proto/signaling.proto`](proto/signaling.proto). The generated `*.pb.go` files are committed. After editing the proto, regenerate them with [buf](https://buf.build):
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+buf generate
 ```
 
 ## Tech stack
 
-Go 1.24 · gRPC · Protocol Buffers · gRPC-Web
+Go 1.24 · gRPC · Protocol Buffers · buf
 
 ## License
 

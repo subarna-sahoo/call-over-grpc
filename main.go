@@ -8,7 +8,7 @@ import (
 	"net"
 	"sync"
 
-	pb "video_signaling/proto"
+	pb "github.com/subarna-sahoo/call-over-grpc/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -17,63 +17,79 @@ import (
 type Server struct {
 	pb.UnimplementedCallServiceServer
 	rooms map[string][]pb.CallService_JoinRoomServer
-	lock  sync.RWMutex
+	// lock guards rooms and also serializes Send calls, since a gRPC stream
+	// must not be written to from several goroutines at once.
+	lock sync.Mutex
+}
+
+func NewServer() *Server {
+	return &Server{rooms: make(map[string][]pb.CallService_JoinRoomServer)}
 }
 
 func (s *Server) JoinRoom(req *pb.JoinRequest, stream pb.CallService_JoinRoomServer) error {
-	clientIP := stream.Context().Value("client-ip").(string)
+	clientIP, _ := stream.Context().Value("client-ip").(string)
 	userID := clientIP // using IP as userID
 
 	s.lock.Lock()
 	s.rooms[req.RoomId] = append(s.rooms[req.RoomId], stream)
 	s.lock.Unlock()
 
-	event := &pb.RoomEvent{
+	s.broadcast(req.RoomId, &pb.RoomEvent{
 		UserId:    userID,
 		EventType: "joined",
 		Payload:   fmt.Sprintf("%s joined", userID),
-	}
-	s.broadcast(req.RoomId, event)
+	})
 
-	// Keep stream open
-	for {
-		<-stream.Context().Done()
-		break
-	}
+	// Keep stream open until the client goes away, then drop it from the room
+	<-stream.Context().Done()
+	s.leave(req.RoomId, stream)
+	s.broadcast(req.RoomId, &pb.RoomEvent{
+		UserId:    userID,
+		EventType: "left",
+		Payload:   fmt.Sprintf("%s left", userID),
+	})
 	return nil
 }
 
 func (s *Server) SendSignal(ctx context.Context, req *pb.SignalRequest) (*pb.SignalResponse, error) {
-	s.lock.RLock()
-	clients := s.rooms[req.RoomId]
-	s.lock.RUnlock()
-
-	event := &pb.RoomEvent{
+	s.broadcast(req.RoomId, &pb.RoomEvent{
 		UserId:    req.FromUser,
 		EventType: req.SignalType,
 		Payload:   req.SignalData,
-	}
-
-	for _, client := range clients {
-		client.Send(event)
-	}
+	})
 	return &pb.SignalResponse{Status: "ok"}, nil
 }
 
 func (s *Server) broadcast(roomId string, event *pb.RoomEvent) {
-	s.lock.RLock()
-	defer s.lock.RUnlock()
+	s.lock.Lock()
+	defer s.lock.Unlock()
 	for _, client := range s.rooms[roomId] {
-		client.Send(event)
+		if err := client.Send(event); err != nil {
+			log.Printf("send to room %s failed: %v", roomId, err)
+		}
 	}
 }
 
-func main() {
-	lis, err := net.Listen("tcp", ":50051")
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+func (s *Server) leave(roomId string, stream pb.CallService_JoinRoomServer) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	clients := s.rooms[roomId]
+	for i, client := range clients {
+		if client == stream {
+			clients = append(clients[:i], clients[i+1:]...)
+			break
+		}
 	}
+	if len(clients) == 0 {
+		delete(s.rooms, roomId)
+	} else {
+		s.rooms[roomId] = clients
+	}
+}
 
+// NewGRPCServer builds the gRPC server with the client-IP interceptors and the
+// CallService registered.
+func NewGRPCServer(svc *Server) *grpc.Server {
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(func(
 			ctx context.Context,
@@ -96,12 +112,21 @@ func main() {
 			return handler(srv, ss)
 		}),
 	)
+	pb.RegisterCallServiceServer(grpcServer, svc)
+	return grpcServer
+}
 
-	pb.RegisterCallServiceServer(grpcServer, &Server{
-		rooms: make(map[string][]pb.CallService_JoinRoomServer),
-	})
+func main() {
+	lis, err := net.Listen("tcp", ":50051")
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	grpcServer := NewGRPCServer(NewServer())
 	log.Println("gRPC server running on :50051")
-	grpcServer.Serve(lis)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
 }
 
 type wrappedStream struct {
